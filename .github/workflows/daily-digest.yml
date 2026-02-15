@@ -44,10 +44,6 @@ jobs:
             echo "Either OPENAI_API_KEY or GEMINI_API_KEY must be set in repository secrets."
             exit 1
           fi
-          if [ -z "${{ secrets.SMTP_SERVER }}" ] || [ -z "${{ secrets.SMTP_PORT }}" ] || [ -z "${{ secrets.SMTP_USERNAME }}" ] || [ -z "${{ secrets.SMTP_PASSWORD }}" ] || [ -z "${{ secrets.NOTIFY_EMAIL_FROM }}" ] || [ -z "${{ secrets.NOTIFY_EMAIL_TO }}" ]; then
-            echo "SMTP_SERVER/SMTP_PORT/SMTP_USERNAME/SMTP_PASSWORD/NOTIFY_EMAIL_FROM/NOTIFY_EMAIL_TO must be set in repository secrets."
-            exit 1
-          fi
 
       - name: Set output variables
         id: vars
@@ -115,6 +111,7 @@ jobs:
   notify:
     needs: [generate, deploy]
     runs-on: ubuntu-latest
+    if: ${{ secrets.SMTP_SERVER != '' && secrets.SMTP_PORT != '' && secrets.SMTP_USERNAME != '' && secrets.SMTP_PASSWORD != '' && secrets.NOTIFY_EMAIL_FROM != '' && secrets.NOTIFY_EMAIL_TO != '' }}
     steps:
       - name: Send email notification
         uses: dawidd6/action-send-mail@v3

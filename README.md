@@ -78,6 +78,7 @@ npx -y bun scripts/digest.ts --hours 48 --top-n 15 --lang zh --output ./digest.m
 说明：
 - 至少需要配置一组 AI Key：`OPENAI_API_KEY` 或 `GEMINI_API_KEY`
 - 若你使用兼容网关，建议同时设置 `OPENAI_BASE_URL` + `OPENAI_MODEL`
+- 邮件通知是可选能力：若未配置完整 SMTP/收件人 secrets，网页仍会正常更新，只是跳过通知邮件
 
 ### 2. 启用 GitHub Pages
 
