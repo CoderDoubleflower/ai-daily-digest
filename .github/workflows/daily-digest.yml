@@ -1,0 +1,137 @@
+name: Daily Digest Website + Email
+
+on:
+  schedule:
+    # 09:00 Asia/Shanghai (UTC+8) every day
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-digest-pages
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    outputs:
+      report_file: ${{ steps.vars.outputs.report_file }}
+      report_date: ${{ steps.vars.outputs.report_date }}
+    env:
+      TZ: Asia/Shanghai
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Validate required secrets
+        run: |
+          if [ -z "${OPENAI_API_KEY}" ] && [ -z "${GEMINI_API_KEY}" ]; then
+            echo "Either OPENAI_API_KEY or GEMINI_API_KEY must be set in repository secrets."
+            exit 1
+          fi
+          if [ -z "${{ secrets.SMTP_SERVER }}" ] || [ -z "${{ secrets.SMTP_PORT }}" ] || [ -z "${{ secrets.SMTP_USERNAME }}" ] || [ -z "${{ secrets.SMTP_PASSWORD }}" ] || [ -z "${{ secrets.NOTIFY_EMAIL_FROM }}" ] || [ -z "${{ secrets.NOTIFY_EMAIL_TO }}" ]; then
+            echo "SMTP_SERVER/SMTP_PORT/SMTP_USERNAME/SMTP_PASSWORD/NOTIFY_EMAIL_FROM/NOTIFY_EMAIL_TO must be set in repository secrets."
+            exit 1
+          fi
+
+      - name: Set output variables
+        id: vars
+        run: |
+          REPORT_DATE="$(date +%Y-%m-%d)"
+          REPORT_FILE="digest-$(date +%Y%m%d).md"
+          echo "report_date=${REPORT_DATE}" >> "$GITHUB_OUTPUT"
+          echo "report_file=${REPORT_FILE}" >> "$GITHUB_OUTPUT"
+          mkdir -p reports
+          echo "REPORT_PATH=reports/${REPORT_FILE}" >> "$GITHUB_ENV"
+          echo "SITE_REPORT_PATH=site/reports/${REPORT_FILE}" >> "$GITHUB_ENV"
+
+      - name: Generate digest
+        run: |
+          bun scripts/digest.ts \
+            --hours 48 \
+            --top-n 15 \
+            --lang zh \
+            --output "${REPORT_PATH}"
+
+      - name: Commit and push report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${REPORT_PATH}"
+
+          if git diff --cached --quiet; then
+            echo "No report changes to commit."
+          else
+            git commit -m "chore: daily digest $(basename "${REPORT_PATH}")"
+            git push
+          fi
+
+      - name: Prepare Pages site files
+        run: |
+          mkdir -p site/reports
+          cp web/index.html site/index.html
+          cp "${REPORT_PATH}" "${SITE_REPORT_PATH}"
+          cp "${REPORT_PATH}" site/latest.md
+
+          UPDATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > site/latest-meta.json << EOF
+          {
+            "updatedAt": "${UPDATED_AT}",
+            "reportPath": "reports/${{ steps.vars.outputs.report_file }}",
+            "reportFile": "${{ steps.vars.outputs.report_file }}"
+          }
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: generate
+    runs-on: ubuntu-latest
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  notify:
+    needs: [generate, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send email notification
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          secure: ${{ secrets.SMTP_SECURE || 'true' }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: ${{ secrets.NOTIFY_EMAIL_FROM }}
+          to: ${{ secrets.NOTIFY_EMAIL_TO }}
+          subject: "[AI Daily Digest] ${{ needs.generate.outputs.report_date }} 已更新"
+          body: |
+            你的 AI Daily Digest 已更新完成。
+
+            日期: ${{ needs.generate.outputs.report_date }}
+            报告文件: ${{ needs.generate.outputs.report_file }}
+            网页地址: ${{ needs.deploy.outputs.page_url }}
+
+            这是 GitHub Actions 自动发送的通知邮件。

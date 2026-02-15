@@ -43,6 +43,10 @@ Agent 在执行前**必须检查**此文件是否存在：
 **配置文件结构**:
 ```json
 {
+  "provider": "openai",
+  "openaiApiKey": "",
+  "openaiBaseUrl": "",
+  "openaiModel": "",
   "geminiApiKey": "",
   "timeRange": 48,
   "topN": 15,
@@ -69,7 +73,7 @@ Agent 在**每次**运行 `/digest` 时，在回复开头向用户输出以下�
 cat ~/.hn-daily-digest/config.json 2>/dev/null || echo "NO_CONFIG"
 ```
 
-如果配置存在且有 `geminiApiKey`，询问是否复用：
+如果配置存在且有 `openaiApiKey` 或 `geminiApiKey`，询问是否复用：
 
 ```
 question({
@@ -122,28 +126,36 @@ question({
 })
 ```
 
-### Step 1b: Gemini API Key
+### Step 1b: AI API Key
 
 如果配置中没有已保存的 API Key，询问：
 
 ```
 question({
   questions: [{
-    header: "Gemini API Key",
-    question: "需要 Gemini API Key 进行 AI 评分和摘要\n\n获取方式：访问 https://aistudio.google.com/apikey 创建免费 API Key",
+    header: "AI API Key",
+    question: "需要 API Key 进行 AI 评分和摘要\n\n推荐：OpenAI 兼容接口 Key\n也支持 Gemini Key（https://aistudio.google.com/apikey）",
     options: []
   }]
 })
 ```
 
-如果 `config.geminiApiKey` 已存在，跳过此步。
+如果 `config.openaiApiKey` 或 `config.geminiApiKey` 已存在，跳过此步。
 
 ### Step 2: 执行脚本
 
 ```bash
 mkdir -p ./output
 
-export GEMINI_API_KEY="<key>"
+# 选择一种方式配置 API Key（二选一）
+export OPENAI_API_KEY="<key>"
+# 可选：兼容 OpenAI 格式的第三方服务地址
+# export OPENAI_BASE_URL="https://your-provider.example/v1"
+# 可选：模型名
+# export OPENAI_MODEL="gpt-4o-mini"
+# 或者使用 Gemini 原生接口：
+# export GEMINI_API_KEY="<key>"
+# 可选：export GEMINI_MODEL="gemini-2.0-flash"
 
 npx -y bun ${SKILL_DIR}/scripts/digest.ts \
   --hours <timeRange> \
@@ -158,7 +170,11 @@ npx -y bun ${SKILL_DIR}/scripts/digest.ts \
 mkdir -p ~/.hn-daily-digest
 cat > ~/.hn-daily-digest/config.json << 'EOF'
 {
-  "geminiApiKey": "<key>",
+  "provider": "<openai|gemini>",
+  "openaiApiKey": "<key-or-empty>",
+  "openaiBaseUrl": "<url-or-empty>",
+  "openaiModel": "<model-or-empty>",
+  "geminiApiKey": "<key-or-empty>",
   "timeRange": <hours>,
   "topN": <topN>,
   "language": "<zh|en>",
@@ -205,8 +221,8 @@ EOF
 ## 环境要求
 
 - `bun` 运行时（通过 `npx -y bun` 自动安装）
-- GEMINI_API_KEY 环境变量
-- 网络访问（需要能访问 RSS 源和 Gemini API）
+- OPENAI_API_KEY 或 GEMINI_API_KEY 环境变量
+- 网络访问（需要能访问 RSS 源和 AI API）
 
 ---
 
@@ -222,8 +238,8 @@ EOF
 
 ## 故障排除
 
-### "GEMINI_API_KEY not set"
-需要提供 Gemini API Key，可在 https://aistudio.google.com/apikey 免费获取。
+### "Missing API key"
+需要提供 OPENAI_API_KEY（推荐）或 GEMINI_API_KEY（可在 https://aistudio.google.com/apikey 免费获取）。
 
 ### "Failed to fetch N feeds"
 部分 RSS 源可能暂时不可用，脚本会跳过失败的源并继续处理。

@@ -6,11 +6,14 @@ import process from 'node:process';
 // Constants
 // ============================================================================
 
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+const DEFAULT_GEMINI_MODEL = 'gemini-2.0-flash';
+const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
 const FEED_FETCH_TIMEOUT_MS = 15_000;
 const FEED_CONCURRENCY = 10;
-const GEMINI_BATCH_SIZE = 10;
-const MAX_CONCURRENT_GEMINI = 2;
+const AI_BATCH_SIZE = 10;
+const MAX_CONCURRENT_AI = 2;
 
 // 90 RSS feeds from Hacker News Popularity Contest 2025 (curated by Karpathy)
 const RSS_FEEDS: Array<{ name: string; xmlUrl: string; htmlUrl: string }> = [
@@ -146,7 +149,16 @@ interface ScoredArticle extends Article {
   reason: string;
 }
 
-interface GeminiScoringResult {
+type AiProvider = 'gemini' | 'openai';
+
+interface AiClientConfig {
+  provider: AiProvider;
+  apiKey: string;
+  model: string;
+  openAiBaseUrl?: string;
+}
+
+interface AiScoringResult {
   results: Array<{
     index: number;
     relevance: number;
@@ -157,7 +169,7 @@ interface GeminiScoringResult {
   }>;
 }
 
-interface GeminiSummaryResult {
+interface AiSummaryResult {
   results: Array<{
     index: number;
     titleZh: string;
@@ -357,11 +369,42 @@ async function fetchAllFeeds(feeds: typeof RSS_FEEDS): Promise<Article[]> {
 }
 
 // ============================================================================
-// Gemini API
+// AI API
 // ============================================================================
 
-async function callGemini(prompt: string, apiKey: string): Promise<string> {
-  const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, '');
+}
+
+function resolveAiClientConfig(): AiClientConfig | null {
+  const openAiApiKey = process.env.OPENAI_API_KEY?.trim();
+  if (openAiApiKey) {
+    const openAiBaseUrl = process.env.OPENAI_BASE_URL?.trim() || DEFAULT_OPENAI_BASE_URL;
+    const openAiModel = process.env.OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL;
+    return {
+      provider: 'openai',
+      apiKey: openAiApiKey,
+      model: openAiModel,
+      openAiBaseUrl: trimTrailingSlash(openAiBaseUrl),
+    };
+  }
+
+  const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
+  if (geminiApiKey) {
+    const geminiModel = process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
+    return {
+      provider: 'gemini',
+      apiKey: geminiApiKey,
+      model: geminiModel,
+    };
+  }
+
+  return null;
+}
+
+async function callGeminiApi(prompt: string, config: AiClientConfig): Promise<string> {
+  const url = `${GEMINI_API_BASE_URL}/${encodeURIComponent(config.model)}:generateContent?key=${config.apiKey}`;
+  const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -373,19 +416,78 @@ async function callGemini(prompt: string, apiKey: string): Promise<string> {
       },
     }),
   });
-  
+
   if (!response.ok) {
     const errorText = await response.text().catch(() => 'Unknown error');
     throw new Error(`Gemini API error (${response.status}): ${errorText}`);
   }
-  
+
   const data = await response.json() as {
     candidates?: Array<{
       content?: { parts?: Array<{ text?: string }> };
     }>;
   };
-  
+
   return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
+
+function extractOpenAiText(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part === 'object' && 'text' in part) {
+          const text = (part as { text?: unknown }).text;
+          if (typeof text === 'string') return text;
+        }
+        return '';
+      })
+      .join('')
+      .trim();
+  }
+
+  return '';
+}
+
+async function callOpenAiApi(prompt: string, config: AiClientConfig): Promise<string> {
+  const baseUrl = config.openAiBaseUrl || DEFAULT_OPENAI_BASE_URL;
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.3,
+      top_p: 0.8,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => 'Unknown error');
+    throw new Error(`OpenAI-compatible API error (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json() as {
+    choices?: Array<{
+      message?: { content?: unknown };
+    }>;
+  };
+
+  return extractOpenAiText(data.choices?.[0]?.message?.content);
+}
+
+async function callAI(prompt: string, config: AiClientConfig): Promise<string> {
+  if (config.provider === 'openai') {
+    return callOpenAiApi(prompt, config);
+  }
+  return callGeminiApi(prompt, config);
 }
 
 function parseJsonResponse<T>(text: string): T {
@@ -462,7 +564,7 @@ ${articlesList}
 
 async function scoreArticlesWithAI(
   articles: Article[],
-  apiKey: string
+  aiConfig: AiClientConfig
 ): Promise<Map<number, { relevance: number; quality: number; timeliness: number; category: CategoryId; keywords: string[] }>> {
   const allScores = new Map<number, { relevance: number; quality: number; timeliness: number; category: CategoryId; keywords: string[] }>();
   
@@ -474,21 +576,21 @@ async function scoreArticlesWithAI(
   }));
   
   const batches: typeof indexed[] = [];
-  for (let i = 0; i < indexed.length; i += GEMINI_BATCH_SIZE) {
-    batches.push(indexed.slice(i, i + GEMINI_BATCH_SIZE));
+  for (let i = 0; i < indexed.length; i += AI_BATCH_SIZE) {
+    batches.push(indexed.slice(i, i + AI_BATCH_SIZE));
   }
   
   console.log(`[digest] AI scoring: ${articles.length} articles in ${batches.length} batches`);
   
   const validCategories = new Set<string>(['ai-ml', 'security', 'engineering', 'tools', 'opinion', 'other']);
   
-  for (let i = 0; i < batches.length; i += MAX_CONCURRENT_GEMINI) {
-    const batchGroup = batches.slice(i, i + MAX_CONCURRENT_GEMINI);
+  for (let i = 0; i < batches.length; i += MAX_CONCURRENT_AI) {
+    const batchGroup = batches.slice(i, i + MAX_CONCURRENT_AI);
     const promises = batchGroup.map(async (batch) => {
       try {
         const prompt = buildScoringPrompt(batch);
-        const responseText = await callGemini(prompt, apiKey);
-        const parsed = parseJsonResponse<GeminiScoringResult>(responseText);
+        const responseText = await callAI(prompt, aiConfig);
+        const parsed = parseJsonResponse<AiScoringResult>(responseText);
         
         if (parsed.results && Array.isArray(parsed.results)) {
           for (const result of parsed.results) {
@@ -512,7 +614,7 @@ async function scoreArticlesWithAI(
     });
     
     await Promise.all(promises);
-    console.log(`[digest] Scoring progress: ${Math.min(i + MAX_CONCURRENT_GEMINI, batches.length)}/${batches.length} batches`);
+    console.log(`[digest] Scoring progress: ${Math.min(i + MAX_CONCURRENT_AI, batches.length)}/${batches.length} batches`);
   }
   
   return allScores;
@@ -571,7 +673,7 @@ ${articlesList}
 
 async function summarizeArticles(
   articles: Array<Article & { index: number }>,
-  apiKey: string,
+  aiConfig: AiClientConfig,
   lang: 'zh' | 'en'
 ): Promise<Map<number, { titleZh: string; summary: string; reason: string }>> {
   const summaries = new Map<number, { titleZh: string; summary: string; reason: string }>();
@@ -585,19 +687,19 @@ async function summarizeArticles(
   }));
   
   const batches: typeof indexed[] = [];
-  for (let i = 0; i < indexed.length; i += GEMINI_BATCH_SIZE) {
-    batches.push(indexed.slice(i, i + GEMINI_BATCH_SIZE));
+  for (let i = 0; i < indexed.length; i += AI_BATCH_SIZE) {
+    batches.push(indexed.slice(i, i + AI_BATCH_SIZE));
   }
   
   console.log(`[digest] Generating summaries for ${articles.length} articles in ${batches.length} batches`);
   
-  for (let i = 0; i < batches.length; i += MAX_CONCURRENT_GEMINI) {
-    const batchGroup = batches.slice(i, i + MAX_CONCURRENT_GEMINI);
+  for (let i = 0; i < batches.length; i += MAX_CONCURRENT_AI) {
+    const batchGroup = batches.slice(i, i + MAX_CONCURRENT_AI);
     const promises = batchGroup.map(async (batch) => {
       try {
         const prompt = buildSummaryPrompt(batch, lang);
-        const responseText = await callGemini(prompt, apiKey);
-        const parsed = parseJsonResponse<GeminiSummaryResult>(responseText);
+        const responseText = await callAI(prompt, aiConfig);
+        const parsed = parseJsonResponse<AiSummaryResult>(responseText);
         
         if (parsed.results && Array.isArray(parsed.results)) {
           for (const result of parsed.results) {
@@ -617,7 +719,7 @@ async function summarizeArticles(
     });
     
     await Promise.all(promises);
-    console.log(`[digest] Summary progress: ${Math.min(i + MAX_CONCURRENT_GEMINI, batches.length)}/${batches.length} batches`);
+    console.log(`[digest] Summary progress: ${Math.min(i + MAX_CONCURRENT_AI, batches.length)}/${batches.length} batches`);
   }
   
   return summaries;
@@ -629,7 +731,7 @@ async function summarizeArticles(
 
 async function generateHighlights(
   articles: ScoredArticle[],
-  apiKey: string,
+  aiConfig: AiClientConfig,
   lang: 'zh' | 'en'
 ): Promise<string> {
   const articleList = articles.slice(0, 10).map((a, i) =>
@@ -651,7 +753,7 @@ ${articleList}
 直接返回纯文本总结，不要 JSON，不要 markdown 格式。`;
 
   try {
-    const text = await callGemini(prompt, apiKey);
+    const text = await callAI(prompt, aiConfig);
     return text.trim();
   } catch (error) {
     console.warn(`[digest] Highlights generation failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -908,7 +1010,11 @@ Options:
   --help          Show this help
 
 Environment:
-  GEMINI_API_KEY  Required. Get one at https://aistudio.google.com/apikey
+  OPENAI_API_KEY  Optional. OpenAI-compatible API key (preferred if set)
+  OPENAI_BASE_URL Optional. Default: https://api.openai.com/v1
+  OPENAI_MODEL    Optional. Default: gpt-4o-mini
+  GEMINI_API_KEY  Optional fallback. Get one at https://aistudio.google.com/apikey
+  GEMINI_MODEL    Optional. Default: gemini-2.0-flash
 
 Examples:
   bun scripts/digest.ts --hours 24 --top-n 10 --lang zh
@@ -939,10 +1045,11 @@ async function main(): Promise<void> {
     }
   }
   
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error('[digest] Error: GEMINI_API_KEY environment variable is required.');
-    console.error('[digest] Get one at: https://aistudio.google.com/apikey');
+  const aiConfig = resolveAiClientConfig();
+  if (!aiConfig) {
+    console.error('[digest] Error: Missing API key.');
+    console.error('[digest] Set OPENAI_API_KEY (preferred) or GEMINI_API_KEY.');
+    console.error('[digest] Gemini key URL: https://aistudio.google.com/apikey');
     process.exit(1);
   }
   
@@ -955,6 +1062,11 @@ async function main(): Promise<void> {
   console.log(`[digest] Time range: ${hours} hours`);
   console.log(`[digest] Top N: ${topN}`);
   console.log(`[digest] Language: ${lang}`);
+  console.log(`[digest] AI Provider: ${aiConfig.provider}`);
+  console.log(`[digest] AI Model: ${aiConfig.model}`);
+  if (aiConfig.provider === 'openai' && aiConfig.openAiBaseUrl) {
+    console.log(`[digest] OpenAI Base URL: ${aiConfig.openAiBaseUrl}`);
+  }
   console.log(`[digest] Output: ${outputPath}`);
   console.log('');
   
@@ -979,7 +1091,7 @@ async function main(): Promise<void> {
   }
   
   console.log(`[digest] Step 3/5: AI scoring ${recentArticles.length} articles...`);
-  const scores = await scoreArticlesWithAI(recentArticles, apiKey);
+  const scores = await scoreArticlesWithAI(recentArticles, aiConfig);
   
   const scoredArticles = recentArticles.map((article, index) => {
     const score = scores.get(index) || { relevance: 5, quality: 5, timeliness: 5, category: 'other' as CategoryId, keywords: [] };
@@ -997,7 +1109,7 @@ async function main(): Promise<void> {
   
   console.log(`[digest] Step 4/5: Generating AI summaries...`);
   const indexedTopArticles = topArticles.map((a, i) => ({ ...a, index: i }));
-  const summaries = await summarizeArticles(indexedTopArticles, apiKey, lang);
+  const summaries = await summarizeArticles(indexedTopArticles, aiConfig, lang);
   
   const finalArticles: ScoredArticle[] = topArticles.map((a, i) => {
     const sm = summaries.get(i) || { titleZh: a.title, summary: a.description.slice(0, 200), reason: '' };
@@ -1023,7 +1135,7 @@ async function main(): Promise<void> {
   });
   
   console.log(`[digest] Step 5/5: Generating today's highlights...`);
-  const highlights = await generateHighlights(finalArticles, apiKey, lang);
+  const highlights = await generateHighlights(finalArticles, aiConfig, lang);
   
   const successfulSources = new Set(allArticles.map(a => a.sourceName));
   
