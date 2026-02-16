@@ -541,7 +541,7 @@ function buildScoringPrompt(articles: Array<{ index: number; title: string; desc
 - other: 以上都不太适合的
 
 ## 关键词提取
-提取 2-4 个最能代表文章主题的关键词（用英文，简短，如 "Rust", "LLM", "database", "performance"）
+提取 2-4 个最能代表文章主题的关键词（用中文，简短，如 "数据库", "推理优化", "编译器", "性能调优"）
 
 ## 待评分文章
 
@@ -556,7 +556,7 @@ ${articlesList}
       "quality": 7,
       "timeliness": 9,
       "category": "engineering",
-      "keywords": ["Rust", "compiler", "performance"]
+      "keywords": ["数据库", "编译器", "性能优化"]
     }
   ]
 }`;
@@ -633,8 +633,16 @@ function buildSummaryPrompt(
   ).join('\n\n---\n\n');
 
   const langInstruction = lang === 'zh'
-    ? '请用中文撰写摘要和推荐理由。如果原文是英文，请翻译为中文。标题翻译也用中文。'
+    ? '请用中文撰写摘要和推荐理由。如果原文是英文，请翻译为中文。标题翻译也用中文。输出中不要出现英文单词或英文缩写。'
     : 'Write summaries, reasons, and title translations in English.';
+
+  const langStrictRules = lang === 'zh'
+    ? `
+中文输出强约束：
+- titleZh / summary / reason 只使用中文、数字和中文标点，不要出现英文单词、英文缩写或英文括号
+- 人名、机构名、产品名、技术术语尽量翻译为通顺中文；如无通行译名，使用中文音译或中文解释
+`
+    : '';
 
   return `你是一个技术内容摘要专家。请为以下文章完成三件事：
 
@@ -646,6 +654,7 @@ function buildSummaryPrompt(
 3. **推荐理由** (reason): 1 句话说明"为什么值得读"，区别于摘要（摘要说"是什么"，推荐理由说"为什么"）。
 
 ${langInstruction}
+${langStrictRules}
 
 摘要要求：
 - 直接说重点，不要用"本文讨论了..."、"这篇文章介绍了..."这种开头
@@ -713,7 +722,15 @@ async function summarizeArticles(
       } catch (error) {
         console.warn(`[digest] Summary batch failed: ${error instanceof Error ? error.message : String(error)}`);
         for (const item of batch) {
-          summaries.set(item.index, { titleZh: item.title, summary: item.title, reason: '' });
+          if (lang === 'zh') {
+            summaries.set(item.index, {
+              titleZh: '摘要生成失败（可重试）',
+              summary: '未能生成中文摘要，请稍后重试。',
+              reason: '',
+            });
+          } else {
+            summaries.set(item.index, { titleZh: item.title, summary: item.title, reason: '' });
+          }
         }
       }
     });
@@ -723,6 +740,83 @@ async function summarizeArticles(
   }
   
   return summaries;
+}
+
+function buildChineseNormalizationPrompt(
+  items: Array<{ index: number; titleZh: string; summary: string; reason: string }>
+): string {
+  const list = items.map((item) =>
+    `Index ${item.index}\n标题: ${item.titleZh}\n摘要: ${item.summary}\n推荐理由: ${item.reason}`
+  ).join('\n\n---\n\n');
+
+  return `你是中文编辑，请将以下内容统一润色为纯中文表达。
+
+要求：
+- 必须保留原意，不能删减关键信息
+- 只输出中文、数字、中文标点
+- 不要出现英文单词、英文缩写、英文括号
+- 专有名词和技术术语尽量翻译为中文；如无通用译名，使用中文解释表达
+
+内容列表：
+${list}
+
+请严格按 JSON 返回：
+{
+  "results": [
+    {
+      "index": 0,
+      "titleZh": "中文标题",
+      "summary": "纯中文摘要",
+      "reason": "纯中文推荐理由"
+    }
+  ]
+}`;
+}
+
+async function normalizeSummariesToChinese(
+  summaries: Map<number, { titleZh: string; summary: string; reason: string }>,
+  aiConfig: AiClientConfig
+): Promise<Map<number, { titleZh: string; summary: string; reason: string }>> {
+  const entries = Array.from(summaries.entries())
+    .map(([index, value]) => ({ index, ...value }))
+    .sort((a, b) => a.index - b.index);
+
+  if (entries.length === 0) return summaries;
+
+  const normalized = new Map<number, { titleZh: string; summary: string; reason: string }>(summaries);
+  const batches: typeof entries[] = [];
+  for (let i = 0; i < entries.length; i += AI_BATCH_SIZE) {
+    batches.push(entries.slice(i, i + AI_BATCH_SIZE));
+  }
+
+  console.log(`[digest] Normalizing summaries to Chinese in ${batches.length} batches`);
+
+  for (let i = 0; i < batches.length; i += MAX_CONCURRENT_AI) {
+    const batchGroup = batches.slice(i, i + MAX_CONCURRENT_AI);
+    const promises = batchGroup.map(async (batch) => {
+      try {
+        const prompt = buildChineseNormalizationPrompt(batch);
+        const responseText = await callAI(prompt, aiConfig);
+        const parsed = parseJsonResponse<AiSummaryResult>(responseText);
+        if (parsed.results && Array.isArray(parsed.results)) {
+          for (const result of parsed.results) {
+            normalized.set(result.index, {
+              titleZh: result.titleZh || '',
+              summary: result.summary || '',
+              reason: result.reason || '',
+            });
+          }
+        }
+      } catch (error) {
+        console.warn(`[digest] Chinese normalization batch failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+
+    await Promise.all(promises);
+    console.log(`[digest] Chinese normalization progress: ${Math.min(i + MAX_CONCURRENT_AI, batches.length)}/${batches.length} batches`);
+  }
+
+  return normalized;
 }
 
 // ============================================================================
@@ -738,7 +832,9 @@ async function generateHighlights(
     `${i + 1}. [${a.category}] ${a.titleZh || a.title} — ${a.summary.slice(0, 100)}`
   ).join('\n');
 
-  const langNote = lang === 'zh' ? '用中文回答。' : 'Write in English.';
+  const langNote = lang === 'zh'
+    ? '用中文回答，禁止使用英文单词和英文缩写。'
+    : 'Write in English.';
 
   const prompt = `根据以下今日精选技术文章列表，写一段 3-5 句话的"今日看点"总结。
 要求：
@@ -913,7 +1009,7 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
       const catMeta = CATEGORY_META[a.category];
       
       report += `${medal} **${a.titleZh || a.title}**\n\n`;
-      report += `[${a.title}](${a.link}) — ${a.sourceName} · ${humanizeTime(a.pubDate)} · ${catMeta.emoji} ${catMeta.label}\n\n`;
+      report += `[${a.titleZh || a.title}](${a.link}) — ${a.sourceName} · ${humanizeTime(a.pubDate)} · ${catMeta.emoji} ${catMeta.label}\n\n`;
       report += `> ${a.summary}\n\n`;
       if (a.reason) {
         report += `💡 **为什么值得读**: ${a.reason}\n\n`;
@@ -975,7 +1071,7 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
       const scoreTotal = a.scoreBreakdown.relevance + a.scoreBreakdown.quality + a.scoreBreakdown.timeliness;
 
       report += `### ${globalIndex}. ${a.titleZh || a.title}\n\n`;
-      report += `[${a.title}](${a.link}) — **${a.sourceName}** · ${humanizeTime(a.pubDate)} · ⭐ ${scoreTotal}/30\n\n`;
+      report += `[${a.titleZh || a.title}](${a.link}) — **${a.sourceName}** · ${humanizeTime(a.pubDate)} · ⭐ ${scoreTotal}/30\n\n`;
       report += `> ${a.summary}\n\n`;
       if (a.keywords.length > 0) {
         report += `🏷️ ${a.keywords.join(', ')}\n\n`;
@@ -987,7 +1083,6 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
   // ── Footer ──
   report += `*生成于 ${dateStr} ${now.toISOString().split('T')[1]?.slice(0, 5) || ''} | 扫描 ${stats.successFeeds} 源 → 获取 ${stats.totalArticles} 篇 → 精选 ${articles.length} 篇*\n`;
   report += `*基于 [Hacker News Popularity Contest 2025](https://refactoringenglish.com/tools/hn-popularity/) RSS 源列表，由 [Andrej Karpathy](https://x.com/karpathy) 推荐*\n`;
-  report += `*由「懂点儿AI」制作，欢迎关注同名微信公众号获取更多 AI 实用技巧 💡*\n`;
 
   return report;
 }
@@ -1109,10 +1204,18 @@ async function main(): Promise<void> {
   
   console.log(`[digest] Step 4/5: Generating AI summaries...`);
   const indexedTopArticles = topArticles.map((a, i) => ({ ...a, index: i }));
-  const summaries = await summarizeArticles(indexedTopArticles, aiConfig, lang);
+  let summaries = await summarizeArticles(indexedTopArticles, aiConfig, lang);
+  if (lang === 'zh') {
+    console.log(`[digest] Step 4.5/5: Enforcing pure Chinese summaries...`);
+    summaries = await normalizeSummariesToChinese(summaries, aiConfig);
+  }
   
   const finalArticles: ScoredArticle[] = topArticles.map((a, i) => {
-    const sm = summaries.get(i) || { titleZh: a.title, summary: a.description.slice(0, 200), reason: '' };
+    const sm = summaries.get(i) || (
+      lang === 'zh'
+        ? { titleZh: '摘要生成失败（可重试）', summary: '未能生成中文摘要，请稍后重试。', reason: '' }
+        : { titleZh: a.title, summary: a.description.slice(0, 200), reason: '' }
+    );
     return {
       title: a.title,
       link: a.link,
