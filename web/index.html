@@ -82,31 +82,6 @@
       letter-spacing: 0.02em;
     }
 
-    .actions {
-      margin-top: 16px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-    }
-
-    .btn {
-      text-decoration: none;
-      display: inline-block;
-      padding: 10px 14px;
-      border-radius: 10px;
-      font-size: 14px;
-      font-weight: 700;
-      border: 1px solid var(--panel-border);
-      color: var(--ink);
-      background: rgba(255, 255, 255, 0.72);
-    }
-
-    .btn.primary {
-      background: var(--primary);
-      color: var(--primary-ink);
-      border-color: transparent;
-    }
-
     .panel {
       margin-top: 20px;
       border: 1px solid var(--panel-border);
@@ -123,22 +98,106 @@
       letter-spacing: -0.01em;
     }
 
-    pre {
+    .markdown {
       margin: 0;
       padding: 14px;
       border-radius: 10px;
       border: 1px solid var(--panel-border);
       background: rgba(255, 255, 255, 0.82);
-      white-space: pre-wrap;
-      word-break: break-word;
       line-height: 1.65;
-      font-family: "SF Mono", "Menlo", "Consolas", monospace;
-      font-size: 13px;
       color: #1f2f25;
+      overflow-x: auto;
+      word-break: break-word;
+    }
+
+    .markdown h1,
+    .markdown h2,
+    .markdown h3,
+    .markdown h4 {
+      margin-top: 1.2em;
+      margin-bottom: 0.6em;
+      line-height: 1.35;
+    }
+
+    .markdown h1 { font-size: 1.8rem; }
+    .markdown h2 { font-size: 1.45rem; }
+    .markdown h3 { font-size: 1.2rem; }
+    .markdown h4 { font-size: 1.05rem; }
+
+    .markdown p,
+    .markdown ul,
+    .markdown ol,
+    .markdown blockquote,
+    .markdown table {
+      margin: 0.8em 0;
+    }
+
+    .markdown ul,
+    .markdown ol {
+      padding-left: 1.5em;
+    }
+
+    .markdown blockquote {
+      border-left: 4px solid #b6c8b9;
+      margin-left: 0;
+      padding-left: 0.9em;
+      color: #425346;
+    }
+
+    .markdown pre {
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #f3f7f0;
+      border: 1px solid #d7e3d7;
+      overflow-x: auto;
+    }
+
+    .markdown code {
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      font-size: 0.92em;
+      background: #edf4ea;
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+
+    .markdown pre code {
+      background: transparent;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    .markdown table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 0.94rem;
+    }
+
+    .markdown th,
+    .markdown td {
+      border: 1px solid #d2dfd1;
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .markdown th {
+      background: #eaf4e5;
+    }
+
+    .markdown a {
+      color: #0f7c4b;
+      text-decoration: none;
+    }
+
+    .markdown a:hover {
+      text-decoration: underline;
     }
 
     .muted {
       color: var(--muted);
+      white-space: pre-wrap;
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      font-size: 13px;
     }
   </style>
 </head>
@@ -151,19 +210,28 @@
         <span class="chip" id="chip-update">更新时间: 加载中...</span>
         <span class="chip" id="chip-file">报告文件: 加载中...</span>
       </div>
-      <div class="actions">
-        <a class="btn primary" id="btn-report" href="./latest.md" target="_blank" rel="noopener noreferrer">查看 Markdown 全文</a>
-        <a class="btn" id="btn-history" href="./reports/" target="_blank" rel="noopener noreferrer">打开历史目录</a>
-      </div>
     </section>
 
     <section class="panel">
       <h2>最新日报内容</h2>
-      <pre id="content" class="muted">加载中...</pre>
+      <div id="content" class="markdown muted">加载中...</div>
     </section>
   </main>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
+    function renderMarkdown(markdown) {
+      if (window.marked && typeof window.marked.parse === "function") {
+        return window.marked.parse(markdown, { breaks: true, gfm: true });
+      }
+
+      return markdown
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\n/g, "<br>");
+    }
+
     function formatShTime(iso) {
       if (!iso) return "未知";
       const d = new Date(iso);
@@ -178,7 +246,6 @@
       const content = document.getElementById("content");
       const chipUpdate = document.getElementById("chip-update");
       const chipFile = document.getElementById("chip-file");
-      const btnReport = document.getElementById("btn-report");
 
       try {
         const [metaRes, mdRes] = await Promise.all([
@@ -198,11 +265,8 @@
 
         chipUpdate.textContent = "更新时间: " + formatShTime(meta.updatedAt);
         chipFile.textContent = "报告文件: " + (meta.reportFile || "未知");
-        if (meta.reportPath) {
-          btnReport.href = "./" + meta.reportPath;
-        }
         content.classList.remove("muted");
-        content.textContent = markdown.trim();
+        content.innerHTML = renderMarkdown(markdown.trim());
       } catch (error) {
         content.classList.add("muted");
         content.textContent = "日报尚未生成。\n请先在 GitHub Actions 手动运行一次工作流。";
