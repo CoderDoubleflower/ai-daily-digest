@@ -111,9 +111,28 @@ jobs:
   notify:
     needs: [generate, deploy]
     runs-on: ubuntu-latest
-    if: ${{ secrets.SMTP_SERVER != '' && secrets.SMTP_PORT != '' && secrets.SMTP_USERNAME != '' && secrets.SMTP_PASSWORD != '' && secrets.NOTIFY_EMAIL_FROM != '' && secrets.NOTIFY_EMAIL_TO != '' }}
+    env:
+      SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
+      NOTIFY_EMAIL_FROM: ${{ secrets.NOTIFY_EMAIL_FROM }}
+      NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
     steps:
+      - name: Check email config
+        id: email_config
+        run: |
+          if [ -n "${SMTP_SERVER}" ] && [ -n "${SMTP_PORT}" ] && [ -n "${SMTP_USERNAME}" ] && [ -n "${SMTP_PASSWORD}" ] && [ -n "${NOTIFY_EMAIL_FROM}" ] && [ -n "${NOTIFY_EMAIL_TO}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Email notification is enabled."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Email notification is skipped due to missing SMTP/recipient secrets."
+          fi
+
       - name: Send email notification
+        if: ${{ steps.email_config.outputs.enabled == 'true' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
