@@ -738,6 +738,46 @@ async function summarizeArticles(
     await Promise.all(promises);
     console.log(`[digest] Summary progress: ${Math.min(i + MAX_CONCURRENT_AI, batches.length)}/${batches.length} batches`);
   }
+
+  const missing = indexed.filter((item) => {
+    const existing = summaries.get(item.index);
+    return !existing || !existing.titleZh?.trim() || !existing.summary?.trim();
+  });
+
+  if (missing.length > 0) {
+    console.log(`[digest] Backfilling ${missing.length} missing summaries with single-item retries`);
+    for (const item of missing) {
+      try {
+        const prompt = buildSummaryPrompt([item], lang);
+        const responseText = await callAI(prompt, aiConfig);
+        const parsed = parseJsonResponse<AiSummaryResult>(responseText);
+        const candidate = parsed.results?.find((r) => r.index === item.index) || parsed.results?.[0];
+        if (!candidate || !candidate.summary?.trim()) {
+          throw new Error('Missing summary in retry result');
+        }
+        summaries.set(item.index, {
+          titleZh: candidate.titleZh || (lang === 'zh' ? item.title : item.title),
+          summary: candidate.summary,
+          reason: candidate.reason || '',
+        });
+      } catch (error) {
+        console.warn(`[digest] Summary backfill failed for index ${item.index}: ${error instanceof Error ? error.message : String(error)}`);
+        if (lang === 'zh') {
+          summaries.set(item.index, {
+            titleZh: '摘要生成失败（可重试）',
+            summary: '未能生成中文摘要，请稍后重试。',
+            reason: '',
+          });
+        } else {
+          summaries.set(item.index, {
+            titleZh: item.title,
+            summary: item.title,
+            reason: '',
+          });
+        }
+      }
+    }
+  }
   
   return summaries;
 }
